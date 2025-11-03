@@ -66,6 +66,21 @@ std::thread_local! {
 pub struct Config {
     match_kind: Option<MatchKind>,
     pre: Option<Option<Prefilter>>,
+    pre_strategy: Option<PrefilterStrategy>,
+}
+
+/// The strategy for using a prefilter during PikeVM execution.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum PrefilterStrategy {
+    /// Use the prefilter whenever the PikeVM runs out of states to explore.
+    #[default]
+    OnEmptyStates,
+    /// Use the prefilter in advance to know which positions to skip exploring.
+    /// This leads to matching doing less work in total, but it requires doing
+    /// some work upfront which might go to waste if we find a match before
+    /// reaching the precomputed position from the prefilter. This makes
+    /// matching non-streaming, but on average faster.
+    OneAhead,
 }
 
 impl Config {
@@ -161,6 +176,15 @@ impl Config {
         self
     }
 
+    /// Set the strategy for using a prefilter during PikeVM execution.
+    pub fn prefilter_strategy(
+        mut self,
+        strategy: PrefilterStrategy,
+    ) -> Config {
+        self.pre_strategy = Some(strategy);
+        self
+    }
+
     /// Returns the match semantics set in this configuration.
     pub fn get_match_kind(&self) -> MatchKind {
         self.match_kind.unwrap_or(MatchKind::LeftmostFirst)
@@ -171,6 +195,11 @@ impl Config {
         self.pre.as_ref().unwrap_or(&None).as_ref()
     }
 
+    /// Returns the prefilter strategy set in this configuration, if one at all.
+    pub fn get_prefilter_strategy(&self) -> Option<PrefilterStrategy> {
+        self.pre_strategy
+    }
+
     /// Overwrite the default configuration such that the options in `o` are
     /// always used. If an option in `o` is not set, then the corresponding
     /// option in `self` is used. If it's not set in `self` either, then it
@@ -179,6 +208,7 @@ impl Config {
         Config {
             match_kind: o.match_kind.or(self.match_kind),
             pre: o.pre.or_else(|| self.pre.clone()),
+            pre_strategy: o.pre_strategy.or(self.pre_strategy),
         }
     }
 }
