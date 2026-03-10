@@ -70,7 +70,7 @@ pub struct Config {
 }
 
 /// The strategy for using a prefilter during PikeVM execution.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrefilterStrategy {
     /// Use the prefilter whenever the PikeVM runs out of states to explore.
     #[default]
@@ -1282,6 +1282,16 @@ impl PikeVM {
             Some(config) => config,
         };
 
+        #[derive(Copy, Clone)]
+        enum NextMatchingPre {
+            At(usize),
+            Nowhere,
+        }
+
+        let pre_strategy =
+            self.config.get_prefilter_strategy().unwrap_or_default();
+        let mut next_matching_prefix = None;
+
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
         let Cache { ref mut stack, ref mut curr, ref mut next } = cache;
@@ -1299,6 +1309,29 @@ impl PikeVM {
         // match state.)
         let mut at = input.start();
         while at <= input.end() {
+            if pre_strategy == PrefilterStrategy::OneAhead {
+                if let Some(pre) = pre {
+                    // If the position which we have computed is in the past,
+                    // we recompute a new value. Otherwise, we leave it untouched.
+                    // When we are out of states to explore, in the `OneAhead`
+                    // strategy we will use this position to accelerate to.
+                    match next_matching_prefix {
+                        Some(NextMatchingPre::Nowhere) => {}
+                        Some(NextMatchingPre::At(pos)) if pos >= at => {}
+                        Some(NextMatchingPre::At(_)) | None => {
+                            let span = Span::from(at..input.end());
+                            next_matching_prefix =
+                                Some(match pre.find(input.haystack(), span) {
+                                    None => NextMatchingPre::Nowhere,
+                                    Some(ref span) => {
+                                        NextMatchingPre::At(span.start)
+                                    }
+                                });
+                        }
+                    }
+                }
+            }
+
             // If we have no states left to visit, then there are some cases
             // where we know we can quit early or even skip ahead.
             if curr.set.is_empty() {
@@ -1321,13 +1354,39 @@ impl PikeVM {
                 // ahead until we find something that we know might advance us
                 // forward.
                 if let Some(pre) = pre {
-                    let span = Span::from(at..input.end());
-                    match pre.find(input.haystack(), span) {
-                        None => break,
-                        Some(ref span) => at = span.start,
+                    match pre_strategy {
+                        PrefilterStrategy::OnEmptyStates => {
+                            let span = Span::from(at..input.end());
+                            match pre.find(input.haystack(), span) {
+                                None => break,
+                                Some(ref span) => {
+                                    at = span.start;
+                                }
+                            }
+                        }
+                        PrefilterStrategy::OneAhead => {
+                            let next_pos = next_matching_prefix.expect("in OneAhead strategy the next matching should be Some");
+
+                            match next_pos {
+                                NextMatchingPre::Nowhere => break,
+                                NextMatchingPre::At(pos) => at = pos,
+                            }
+                        }
                     }
                 }
             }
+
+            // If we precomputed the next position returned by the the prefilter,
+            // we know if a match can potentially start here. If not, we skip the
+            // epsilon closure computation which follows. This can potentially save
+            // save us from exploring this position completely.
+            let match_can_start_here = if let Some(next_matching_pre) =
+                next_matching_prefix
+            {
+                matches!(next_matching_pre, NextMatchingPre::At(pos) if pos == at)
+            } else {
+                true
+            };
             // Instead of using the NFA's unanchored start state, we actually
             // always use its anchored starting state. As a result, when doing
             // an unanchored search, we need to simulate our own '(?s-u:.)*?'
@@ -1376,6 +1435,7 @@ impl PikeVM {
             // an anchored search.
             if (hm.is_none() || allmatches)
                 && (!anchored || at == input.start())
+                && match_can_start_here
             {
                 // Since we are adding to the 'curr' active states and since
                 // this is for the start ID, we use a slots slice that is
