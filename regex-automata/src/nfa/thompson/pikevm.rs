@@ -1257,6 +1257,25 @@ impl PikeVM {
         input: &Input<'_>,
         slots: &mut [Option<NonMaxUsize>],
     ) -> Option<HalfMatch> {
+        match self.config.get_prefilter_strategy().unwrap_or_default() {
+            PrefilterStrategy::OnEmptyStates => {
+                self.search_imp_strategy::<false>(cache, input, slots)
+            }
+            PrefilterStrategy::OneAhead => {
+                self.search_imp_strategy::<true>(cache, input, slots)
+            }
+        }
+    }
+
+    /// [`search_imp`] with the specialization to the [`PrefilterStrategy`]. We do
+    /// so to allow the compiler to specialize the function for a particular strategy
+    /// reducing any overhead of checking the strategy on every iteration of the search loop.
+    fn search_imp_strategy<const ONE_AHEAD: bool>(
+        &self,
+        cache: &mut Cache,
+        input: &Input<'_>,
+        slots: &mut [Option<NonMaxUsize>],
+    ) -> Option<HalfMatch> {
         cache.setup_search(slots.len(), input);
         if input.is_done() {
             return None;
@@ -1282,9 +1301,6 @@ impl PikeVM {
             Some(config) => config,
         };
 
-        let pre_strategy =
-            self.config.get_prefilter_strategy().unwrap_or_default();
-
         let pre =
             if anchored { None } else { self.get_config().get_prefilter() };
         let Cache {
@@ -1307,7 +1323,7 @@ impl PikeVM {
         // match state.)
         let mut at = input.start();
         while at <= input.end() {
-            if pre_strategy == PrefilterStrategy::OneAhead {
+            if ONE_AHEAD {
                 if let Some(pre) = pre {
                     // If the position which we have computed is in the past,
                     // we recompute a new value. Otherwise, we leave it untouched.
@@ -1365,28 +1381,25 @@ impl PikeVM {
                 // ahead until we find something that we know might advance us
                 // forward.
                 if let Some(pre) = pre {
-                    match pre_strategy {
-                        PrefilterStrategy::OnEmptyStates => {
-                            let span = Span::from(at..input.end());
-                            match pre.find(input.haystack(), span) {
-                                None => break,
-                                Some(ref span) => {
-                                    at = span.start;
-                                }
-                            }
-                        }
-                        PrefilterStrategy::OneAhead => {
-                            let next_pos = next_matching_pre.expect("in OneAhead strategy the next matching should be Some");
+                    if ONE_AHEAD {
+                        let next_pos = next_matching_pre.expect("in OneAhead strategy the next matching should be Some");
 
-                            match next_pos {
-                                NextMatchingPre {
-                                    pos: NextMatchingPrePos::Nowhere,
-                                    ..
-                                } => break,
-                                NextMatchingPre {
-                                    pos: NextMatchingPrePos::At(pos),
-                                    ..
-                                } => at = pos,
+                        match next_pos {
+                            NextMatchingPre {
+                                pos: NextMatchingPrePos::Nowhere,
+                                ..
+                            } => break,
+                            NextMatchingPre {
+                                pos: NextMatchingPrePos::At(pos),
+                                ..
+                            } => at = pos,
+                        }
+                    } else {
+                        let span = Span::from(at..input.end());
+                        match pre.find(input.haystack(), span) {
+                            None => break,
+                            Some(ref span) => {
+                                at = span.start;
                             }
                         }
                     }
@@ -1397,22 +1410,21 @@ impl PikeVM {
             // we know if a match can potentially start here. If not, we skip the
             // epsilon closure computation which follows. This can potentially save
             // save us from exploring this position completely.
-            let match_can_start_here =
-                if pre_strategy == PrefilterStrategy::OneAhead {
-                    if let Some(next_matching_pre) = *next_matching_pre {
-                        matches!(
-                            next_matching_pre,
-                            NextMatchingPre {
-                                pos: NextMatchingPrePos::At(pos),
-                                ..
-                            } if pos == at,
-                        )
-                    } else {
-                        true
-                    }
+            let match_can_start_here = if ONE_AHEAD {
+                if let Some(next_matching_pre) = *next_matching_pre {
+                    matches!(
+                        next_matching_pre,
+                        NextMatchingPre {
+                            pos: NextMatchingPrePos::At(pos),
+                            ..
+                        } if pos == at,
+                    )
                 } else {
                     true
-                };
+                }
+            } else {
+                true
+            };
             // Instead of using the NFA's unanchored start state, we actually
             // always use its anchored starting state. As a result, when doing
             // an unanchored search, we need to simulate our own '(?s-u:.)*?'
